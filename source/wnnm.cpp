@@ -27,8 +27,8 @@
 #include <immintrin.h>
 #endif
 
-#include <VapourSynth.h>
-#include <VSHelper.h>
+#include <VapourSynth4.h>
+#include <VSHelper4.h>
 
 #include <config.h>
 
@@ -76,12 +76,12 @@ struct Workspace {
 #endif
 
         if (residual) {
-            mean_patch = vs_aligned_malloc<float>((square(block_size) + pad) * sizeof(float), 64);
+            mean_patch = vsh_aligned_malloc<float>((square(block_size) + pad) * sizeof(float), 64);
         } else {
             mean_patch = nullptr;
         }
 
-        current_patch = vs_aligned_malloc<float>((square(block_size) + pad) * sizeof(float), 64);
+        current_patch = vsh_aligned_malloc<float>((square(block_size) + pad) * sizeof(float), 64);
 
         if (radius == 0) {
             intermediate = reinterpret_cast<float *>(std::malloc(2 * height * width * sizeof(float)));
@@ -92,17 +92,17 @@ struct Workspace {
         int m = square(block_size);
         int n = group_size;
 
-        denoising_patch = vs_aligned_malloc<float>((svd_lda * n + pad) * sizeof(float), 64);
+        denoising_patch = vsh_aligned_malloc<float>((svd_lda * n + pad) * sizeof(float), 64);
 
-        svd_s = vs_aligned_malloc<float>(std::min(m, n) * sizeof(float), 64);
+        svd_s = vsh_aligned_malloc<float>(std::min(m, n) * sizeof(float), 64);
 
-        svd_u = vs_aligned_malloc<float>(svd_ldu * std::min(m, n) * sizeof(float), 64);
+        svd_u = vsh_aligned_malloc<float>(svd_ldu * std::min(m, n) * sizeof(float), 64);
 
-        svd_vt = vs_aligned_malloc<float>(svd_ldvt * n * sizeof(float), 64);
+        svd_vt = vsh_aligned_malloc<float>(svd_ldvt * n * sizeof(float), 64);
 
-        svd_work = vs_aligned_malloc<float>(svd_lwork * sizeof(float), 64);
+        svd_work = vsh_aligned_malloc<float>(svd_lwork * sizeof(float), 64);
 
-        svd_iwork = vs_aligned_malloc<int>(8 * std::min(m, n) * sizeof(int), 64);
+        svd_iwork = vsh_aligned_malloc<int>(8 * std::min(m, n) * sizeof(int), 64);
 
         errors = new std::remove_pointer_t<decltype(errors)>;
         center_errors = new std::remove_pointer_t<decltype(center_errors)>;
@@ -161,13 +161,13 @@ struct Workspace {
 };
 
 struct WNNMData {
-    VSNodeRef * node;
+    VSNode * node;
     float sigma[3];
     int block_size, block_step, group_size, bm_range;
     int radius, ps_num, ps_range;
     bool process[3];
     bool residual, adaptive_aggregation;
-    VSNodeRef * ref_node; // rclip
+    VSNode * ref_node; // rclip
     int svd_lwork, svd_lda, svd_ldu, svd_ldvt;
 
     std::unordered_map<std::thread::id, Workspace> workspaces;
@@ -1005,9 +1005,9 @@ static inline void aggregation(
 
 template<bool residual>
 static void process(
-    const std::vector<const VSFrameRef *> & srcs,
-    const std::vector<const VSFrameRef *> & refs,
-    VSFrameRef * dst,
+    const std::vector<const VSFrame *> & srcs,
+    const std::vector<const VSFrame *> & refs,
+    VSFrame * dst,
     WNNMData * d,
     const VSAPI * vsapi
 ) noexcept {
@@ -1055,7 +1055,7 @@ static void process(
 
     std::vector<std::tuple<float, int, int, int>> & errors = *workspace.errors;
 
-    for (int plane = 0; plane < vi->format->numPlanes; plane++) {
+    for (int plane = 0; plane < vi->format.numPlanes; plane++) {
         if (!d->process[plane]) {
             continue;
         }
@@ -1182,29 +1182,12 @@ static void process(
 #endif
 }
 
-static void VS_CC WNNMRawInit(
-    VSMap *in, VSMap *out, void **instanceData, VSNode *node,
-    VSCore *core, const VSAPI *vsapi
-) noexcept {
-
-    WNNMData * d = static_cast<WNNMData *>(*instanceData);
-
-    if (d->radius > 0) {
-        auto vi = *vsapi->getVideoInfo(d->node);
-        vi.height *= 2 * (2 * d->radius + 1);
-        vsapi->setVideoInfo(&vi, 1, node);
-    } else {
-        auto vi = vsapi->getVideoInfo(d->node);
-        vsapi->setVideoInfo(vi, 1, node);
-    }
-}
-
-static const VSFrameRef *VS_CC WNNMRawGetFrame(
-    int n, int activationReason, void **instanceData, void **frameData,
+static const VSFrame *VS_CC WNNMRawGetFrame(
+    int n, int activationReason, void *instanceData, void **frameData,
     VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi
 ) noexcept {
 
-    auto * d = static_cast<WNNMData *>(*instanceData);
+    auto * d = static_cast<WNNMData *>(instanceData);
 
     if (activationReason == arInitial) {
         auto vi = vsapi->getVideoInfo(d->node);
@@ -1223,14 +1206,14 @@ static const VSFrameRef *VS_CC WNNMRawGetFrame(
     } else if (activationReason == arAllFramesReady) {
         auto vi = vsapi->getVideoInfo(d->node);
 
-        std::vector<const VSFrameRef *> srcs;
+        std::vector<const VSFrame *> srcs;
         srcs.reserve(2 * d->radius + 1);
         for (int i = -d->radius; i <= d->radius; i++) {
             auto frame_id = std::clamp(n + i, 0, vi->numFrames - 1);
             srcs.emplace_back(vsapi->getFrameFilter(frame_id, d->node, frameCtx));
         }
 
-        std::vector<const VSFrameRef *> refs;
+        std::vector<const VSFrame *> refs;
         if (d->ref_node) {
             refs.reserve(2 * d->radius + 1);
             for (int i = -d->radius; i <= d->radius; i++) {
@@ -1242,17 +1225,17 @@ static const VSFrameRef *VS_CC WNNMRawGetFrame(
         }
 
         const auto & center_src = srcs[d->radius];
-        VSFrameRef * dst;
+        VSFrame * dst;
         if (d->radius == 0) {
-            const VSFrameRef * fr[] {
+            const VSFrame * fr[] {
                 d->process[0] ? nullptr : center_src,
                 d->process[1] ? nullptr : center_src,
                 d->process[2] ? nullptr : center_src
             };
             const int pl[] { 0, 1, 2 };
-            dst = vsapi->newVideoFrame2(vi->format, vi->width, vi->height, fr, pl, center_src, core);
+            dst = vsapi->newVideoFrame2(&vi->format, vi->width, vi->height, fr, pl, center_src, core);
         } else {
-            dst = vsapi->newVideoFrame(vi->format, vi->width, 2 * (2 * d->radius + 1) * vi->height, center_src, core);
+            dst = vsapi->newVideoFrame(&vi->format, vi->width, 2 * (2 * d->radius + 1) * vi->height, center_src, core);
         }
 
         if (d->residual) {
@@ -1303,18 +1286,18 @@ static void VS_CC WNNMRawCreate(
 
     auto d = std::make_unique<WNNMData>();
 
-    d->node = vsapi->propGetNode(in, "clip", 0, nullptr);
+    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
 
     auto set_error = [&](const std::string & error) -> void {
-        vsapi->setError(out, ("WNNM: " + error).c_str());
+        vsapi->mapSetError(out, ("WNNM: " + error).c_str());
         vsapi->freeNode(d->node);
         return ;
     };
 
     auto vi = vsapi->getVideoInfo(d->node);
 
-    if (!isConstantFormat(vi) || vi->format->sampleType == stInteger ||
-        (vi->format->sampleType == stFloat && vi->format->bitsPerSample != 32)
+    if (!vsh::isConstantVideoFormat(vi) || vi->format.sampleType == stInteger ||
+        (vi->format.sampleType == stFloat && vi->format.bitsPerSample != 32)
     ) {
         return set_error("only constant format 32 bit float input supported");
     }
@@ -1322,7 +1305,7 @@ static void VS_CC WNNMRawCreate(
     int error;
 
     for (unsigned i = 0; i < std::size(d->sigma); i++) {
-        d->sigma[i] = static_cast<float>(vsapi->propGetFloat(in, "sigma", i, &error));
+        d->sigma[i] = static_cast<float>(vsapi->mapGetFloat(in, "sigma", i, &error));
         if (error) {
             d->sigma[i] = (i == 0) ? 3.0f : d->sigma[i - 1];
         }
@@ -1340,7 +1323,7 @@ static void VS_CC WNNMRawCreate(
         }
     }
 
-    d->block_size = int64ToIntS(vsapi->propGetInt(in, "block_size", 0, &error));
+    d->block_size = vsh::int64ToIntS(vsapi->mapGetInt(in, "block_size", 0, &error));
     if (error) {
         // d->block_size = 6;
         d->block_size = 8; // more optimized
@@ -1348,7 +1331,7 @@ static void VS_CC WNNMRawCreate(
         return set_error("\"block_size\" must be positive");
     }
 
-    d->block_step = int64ToIntS(vsapi->propGetInt(in, "block_step", 0, &error));
+    d->block_step = vsh::int64ToIntS(vsapi->mapGetInt(in, "block_step", 0, &error));
     if (error) {
         // d->block_step = 6;
         d->block_step = d->block_size;
@@ -1356,35 +1339,35 @@ static void VS_CC WNNMRawCreate(
         return set_error("\"block_step\" must be positive and no larger than \"block_size\"");
     }
 
-    d->group_size = int64ToIntS(vsapi->propGetInt(in, "group_size", 0, &error));
+    d->group_size = vsh::int64ToIntS(vsapi->mapGetInt(in, "group_size", 0, &error));
     if (error) {
         d->group_size = 8;
     } else if (d->group_size <= 0) {
         return set_error("\"group_size\" must be positive");
     }
 
-    d->bm_range = int64ToIntS(vsapi->propGetInt(in, "bm_range", 0, &error));
+    d->bm_range = vsh::int64ToIntS(vsapi->mapGetInt(in, "bm_range", 0, &error));
     if (error) {
         d->bm_range = 7;
     } else if (d->bm_range < 0) {
         return set_error("\"bm_range\" must be non-negative");
     }
 
-    d->radius = int64ToIntS(vsapi->propGetInt(in, "radius", 0, &error));
+    d->radius = vsh::int64ToIntS(vsapi->mapGetInt(in, "radius", 0, &error));
     if (error) {
         d->radius = 0;
     } else if (d->radius < 0) {
         return set_error("\"radius\" must be non-negative");
     }
 
-    d->ps_num = int64ToIntS(vsapi->propGetInt(in, "ps_num", 0, &error));
+    d->ps_num = vsh::int64ToIntS(vsapi->mapGetInt(in, "ps_num", 0, &error));
     if (error) {
         d->ps_num = 2;
     } else if (d->ps_num <= 0) {
         return set_error("\"ps_num\" must be positive");
     }
 
-    d->ps_range = int64ToIntS(vsapi->propGetInt(in, "ps_range", 0, &error));
+    d->ps_range = vsh::int64ToIntS(vsapi->mapGetInt(in, "ps_range", 0, &error));
     if (error) {
         d->ps_range = 4;
     } else if (d->ps_range < 0) {
@@ -1395,28 +1378,28 @@ static void VS_CC WNNMRawCreate(
     d->svd_ldu = m16(square(d->block_size));
     d->svd_ldvt = m16(std::min(square(d->block_size), d->group_size));
 
-    d->residual = !!vsapi->propGetInt(in, "residual", 0, &error);
+    d->residual = !!vsapi->mapGetInt(in, "residual", 0, &error);
     if (error) {
         d->residual = false;
     }
 
-    d->adaptive_aggregation = !!vsapi->propGetInt(in, "adaptive_aggregation", 0, &error);
+    d->adaptive_aggregation = !!vsapi->mapGetInt(in, "adaptive_aggregation", 0, &error);
     if (error) {
         d->adaptive_aggregation = true;
     }
 
-    d->ref_node = vsapi->propGetNode(in, "rclip", 0, &error);
+    d->ref_node = vsapi->mapGetNode(in, "rclip", 0, &error);
     if (error) {
         d->ref_node = nullptr;
     } else {
         auto ref_vi = vsapi->getVideoInfo(d->ref_node);
-        if (!isSameFormat(vi, ref_vi) || vi->numFrames != ref_vi->numFrames) {
+        if (!vsh::isSameVideoInfo(vi, ref_vi) || vi->numFrames != ref_vi->numFrames) {
             return set_error("\"rclip\" must be of the same format and number of frames as \"clip\"");
         }
     }
 
     VSCoreInfo core_info;
-    vsapi->getCoreInfo2(core, &core_info);
+    vsapi->getCoreInfo(core, &core_info);
     auto numThreads = core_info.numThreads;
     d->workspaces.reserve(numThreads);
 
@@ -1424,13 +1407,28 @@ static void VS_CC WNNMRawCreate(
     int svd_n = d->group_size;
     d->svd_lwork = std::min(svd_m, svd_n) * (6 + 4 * std::min(svd_m, svd_n)) + std::max(svd_m, svd_n);
 
-    vsapi->createFilter(in, out, "WNNMRaw", WNNMRawInit, WNNMRawGetFrame, WNNMRawFree, fmParallel, 0, d.release(), core);
+    VSRequestPattern reqPattern = rpStrictSpatial;
+    VSVideoInfo viOut = *vsapi->getVideoInfo(d->node);
+
+    if (d->radius > 0) {
+        reqPattern = rpGeneral;
+        viOut.height *= 2 * (2 * d->radius + 1);
+    }
+
+    std::vector<VSFilterDependency> deps = {
+        {d->node, reqPattern}
+    };
+
+    if (d->ref_node)
+        deps.push_back({ d->ref_node, reqPattern });
+
+    vsapi->createVideoFilter(out, "WNNMRaw", &viOut, WNNMRawGetFrame, WNNMRawFree, fmParallel, deps.data(), deps.size(), d.release(), core);
 }
 
 struct VAggregateData {
-    VSNodeRef * node;
+    VSNode * node;
 
-    VSNodeRef * src_node;
+    VSNode * src_node;
     const VSVideoInfo * src_vi;
 
     std::array<bool, 3> process; // sigma != 0
@@ -1441,22 +1439,12 @@ struct VAggregateData {
     std::shared_mutex buffer_lock;
 };
 
-static void VS_CC VAggregateInit(
-    VSMap *in, VSMap *out, void **instanceData, VSNode *node,
-    VSCore *core, const VSAPI *vsapi
-) noexcept {
-
-    auto * d = static_cast<VAggregateData *>(*instanceData);
-
-    vsapi->setVideoInfo(d->src_vi, 1, node);
-}
-
-static const VSFrameRef *VS_CC VAggregateGetFrame(
-    int n, int activationReason, void **instanceData, void **frameData,
+static const VSFrame *VS_CC VAggregateGetFrame(
+    int n, int activationReason, void *instanceData, void **frameData,
     VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi
 ) noexcept {
 
-    auto * d = static_cast<VAggregateData *>(*instanceData);
+    auto * d = static_cast<VAggregateData *>(instanceData);
 
     if (activationReason == arInitial) {
         int start_frame = std::max(n - d->radius, 0);
@@ -1467,9 +1455,9 @@ static const VSFrameRef *VS_CC VAggregateGetFrame(
         }
         vsapi->requestFrameFilter(n, d->src_node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
-        const VSFrameRef * src_frame = vsapi->getFrameFilter(n, d->src_node, frameCtx);
+        const VSFrame * src_frame = vsapi->getFrameFilter(n, d->src_node, frameCtx);
 
-        std::vector<const VSFrameRef *> frames;
+        std::vector<const VSFrame *> frames;
         frames.reserve(2 * d->radius + 1);
         for (int i = n - d->radius; i <= n + d->radius; ++i) {
             auto frame_id = std::clamp(i, 0, d->src_vi->numFrames - 1);
@@ -1493,7 +1481,7 @@ static const VSFrameRef *VS_CC VAggregateGetFrame(
             d->buffer_lock.unlock_shared();
 
             if (!init) {
-                assert(d->process[0] || d->src_vi->format->numPlanes > 1);
+                assert(d->process[0] || d->src_vi->format.numPlanes > 1);
 
                 const int max_width {
                     d->process[0] ?
@@ -1508,18 +1496,18 @@ static const VSFrameRef *VS_CC VAggregateGetFrame(
             }
         }
 
-        const VSFrameRef * fr[] {
+        const VSFrame * fr[] {
             d->process[0] ? nullptr : src_frame,
             d->process[1] ? nullptr : src_frame,
             d->process[2] ? nullptr : src_frame
         };
         constexpr int pl[] { 0, 1, 2 };
         auto dst_frame = vsapi->newVideoFrame2(
-            d->src_vi->format,
+            &d->src_vi->format,
             d->src_vi->width, d->src_vi->height,
             fr, pl, src_frame, core);
 
-        for (int plane = 0; plane < d->src_vi->format->numPlanes; ++plane) {
+        for (int plane = 0; plane < d->src_vi->format.numPlanes; ++plane) {
             if (d->process[plane]) {
                 int plane_width = vsapi->getFrameWidth(src_frame, plane);
                 int plane_height = vsapi->getFrameHeight(src_frame, plane);
@@ -1592,12 +1580,12 @@ static void VS_CC VAggregateCreate(
 
     {
         int error;
-        bool internal = !!vsapi->propGetInt(in, "internal", 0, &error);
+        bool internal = !!vsapi->mapGetInt(in, "internal", 0, &error);
         if (error) {
             internal = false;
         }
         if (!internal) {
-            vsapi->setError(
+            vsapi->mapSetError(
                 out,
                 "this interface is for internal use only, please use \"wnnm.WNNM()\" directly"
             );
@@ -1607,28 +1595,33 @@ static void VS_CC VAggregateCreate(
 
     auto d = std::make_unique<VAggregateData>();
 
-    d->node = vsapi->propGetNode(in, "clip", 0, nullptr);
+    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     auto vi = vsapi->getVideoInfo(d->node);
-    d->src_node = vsapi->propGetNode(in, "src", 0, nullptr);
+    d->src_node = vsapi->mapGetNode(in, "src", 0, nullptr);
     d->src_vi = vsapi->getVideoInfo(d->src_node);
 
     d->radius = (vi->height / d->src_vi->height - 2) / 4;
 
     d->process.fill(false);
-    int num_planes_args = vsapi->propNumElements(in, "planes");
+    int num_planes_args = vsapi->mapNumElements(in, "planes");
     for (int i = 0; i < num_planes_args; ++i) {
-        int plane = int64ToIntS(vsapi->propGetInt(in, "planes", i, nullptr));
+        int plane = vsh::int64ToIntS(vsapi->mapGetInt(in, "planes", i, nullptr));
         d->process[plane] = true;
     }
 
     VSCoreInfo core_info;
-    vsapi->getCoreInfo2(core, &core_info);
+    vsapi->getCoreInfo(core, &core_info);
     d->buffer.reserve(core_info.numThreads);
 
-    vsapi->createFilter(
-        in, out, "VAggregate",
-        VAggregateInit, VAggregateGetFrame, VAggregateFree,
-        fmParallel, 0, d.release(), core);
+    VSFilterDependency deps[] = {
+        {d->node, (d->radius > 0 ? rpGeneral : rpStrictSpatial)},
+        {d->src_node, rpStrictSpatial},
+    };
+
+    vsapi->createVideoFilter(
+        out, "VAggregate",
+        d->src_vi, VAggregateGetFrame, VAggregateFree,
+        fmParallel, deps, 2, d.release(), core);
 }
 
 static void VS_CC WNNMCreate(
@@ -1639,9 +1632,9 @@ static void VS_CC WNNMCreate(
     std::array<bool, 3> process;
     process.fill(true);
 
-    int num_sigma_args = vsapi->propNumElements(in, "sigma");
+    int num_sigma_args = vsapi->mapNumElements(in, "sigma");
     for (int i = 0; i < std::min(3, num_sigma_args); ++i) {
-        auto sigma = vsapi->propGetFloat(in, "sigma", i, nullptr);
+        auto sigma = vsapi->mapGetFloat(in, "sigma", i, nullptr);
         if (sigma < std::numeric_limits<float>::epsilon()) {
             process[i] = false;
         }
@@ -1653,79 +1646,77 @@ static void VS_CC WNNMCreate(
     }
 
     bool skip = true;
-    auto src = vsapi->propGetNode(in, "clip", 0, nullptr);
+    auto src = vsapi->mapGetNode(in, "clip", 0, nullptr);
     auto src_vi = vsapi->getVideoInfo(src);
-    for (int i = 0; i < src_vi->format->numPlanes; ++i) {
+    for (int i = 0; i < src_vi->format.numPlanes; ++i) {
         skip &= !process[i];
     }
     if (skip) {
-        vsapi->propSetNode(out, "clip", src, paReplace);
+        vsapi->mapSetNode(out, "clip", src, maReplace);
         vsapi->freeNode(src);
         return ;
     }
 
     auto map = vsapi->invoke(myself, "WNNMRaw", in);
-    if (auto error = vsapi->getError(map); error) {
-        vsapi->setError(out, error);
+    if (auto error = vsapi->mapGetError(map); error) {
+        vsapi->mapSetError(out, error);
         vsapi->freeMap(map);
         vsapi->freeNode(src);
         return ;
     }
 
     int err;
-    int radius = int64ToIntS(vsapi->propGetInt(in, "radius", 0, &err));
+    int radius = vsh::int64ToIntS(vsapi->mapGetInt(in, "radius", 0, &err));
     if (err) {
         radius = 0;
     }
     if (radius == 0) {
         // spatial WNNM should handle everything itself
-        auto node = vsapi->propGetNode(map, "clip", 0, nullptr);
+        auto node = vsapi->mapGetNode(map, "clip", 0, nullptr);
         vsapi->freeMap(map);
-        vsapi->propSetNode(out, "clip", node, paReplace);
+        vsapi->mapSetNode(out, "clip", node, maReplace);
         vsapi->freeNode(node);
         vsapi->freeNode(src);
         return ;
     }
 
-    vsapi->propSetNode(map, "src", src, paReplace);
+    vsapi->mapSetNode(map, "src", src, maReplace);
     vsapi->freeNode(src);
 
     for (int i = 0; i < 3; ++i) {
         if (process[i]) {
-            vsapi->propSetInt(map, "planes", i, paAppend);
+            vsapi->mapSetInt(map, "planes", i, maAppend);
         }
     }
 
-    vsapi->propSetInt(map, "internal", 1, paReplace);
+    vsapi->mapSetInt(map, "internal", 1, maReplace);
 
     auto map2 = vsapi->invoke(myself, "VAggregate", map);
     vsapi->freeMap(map);
-    if (auto error = vsapi->getError(map2); error) {
-        vsapi->setError(out, error);
+    if (auto error = vsapi->mapGetError(map2); error) {
+        vsapi->mapSetError(out, error);
         vsapi->freeMap(map2);
         return ;
     }
 
-    auto node = vsapi->propGetNode(map2, "clip", 0, nullptr);
+    auto node = vsapi->mapGetNode(map2, "clip", 0, nullptr);
     vsapi->freeMap(map2);
-    vsapi->propSetNode(out, "clip", node, paReplace);
+    vsapi->mapSetNode(out, "clip", node, maReplace);
     vsapi->freeNode(node);
 }
 
-VS_EXTERNAL_API(void) VapourSynthPluginInit(
-    VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin
-) noexcept {
+VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
 
     myself = plugin;
 
-    configFunc(
+    vspapi->configPlugin(
         "com.wolframrhodium.wnnm",
         "wnnm", "Weighted Nuclear Norm Minimization Denoiser",
-        VAPOURSYNTH_API_VERSION, 1, plugin
+        VS_MAKE_VERSION(0, 1), VAPOURSYNTH_API_VERSION, 0, plugin
     );
 
     constexpr auto wnnm_args {
-        "clip:clip;"
+        "clip:vnode;"
         "sigma:float[]:opt;"
         "block_size:int:opt;"
         "block_step:int:opt;"
@@ -1736,38 +1727,39 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         "ps_range:int:opt;"
         "residual:int:opt;"
         "adaptive_aggregation:int:opt;"
-        "rclip:clip:opt;"
+        "rclip:vnode:opt;"
     };
 
-    registerFunc("WNNMRaw", wnnm_args, WNNMRawCreate, nullptr, plugin);
+    vspapi->registerFunction("WNNMRaw", wnnm_args, "clip:vnode;", WNNMRawCreate, nullptr, plugin);
 
-    registerFunc(
+    vspapi->registerFunction(
         "VAggregate",
-        "clip:clip;"
-        "src:clip;"
+        "clip:vnode;"
+        "src:vnode;"
         "planes:int[];"
         "internal:int:opt;",
+        "clip:vnode;",
         VAggregateCreate, nullptr, plugin);
 
-    registerFunc("WNNM", wnnm_args, WNNMCreate, nullptr, plugin);
+    vspapi->registerFunction("WNNM", wnnm_args, "clip:vnode;", WNNMCreate, nullptr, plugin);
 
     auto getVersion = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
-        vsapi->propSetData(out, "version", VERSION, -1, paReplace);
+        vsapi->mapSetData(out, "version", VERSION, -1, maReplace);
 
         std::ostringstream mkl_version_build_str;
         mkl_version_build_str << __INTEL_MKL__ << '.' << __INTEL_MKL_MINOR__ << '.' << __INTEL_MKL_UPDATE__;
 
-        vsapi->propSetData(out, "mkl_version_build", mkl_version_build_str.str().c_str(), -1, paReplace);
+        vsapi->mapSetData(out, "mkl_version_build", mkl_version_build_str.str().c_str(), -1, maReplace);
 
         MKLVersion version;
         mkl_get_version(&version);
 
-        vsapi->propSetData(out, "mkl_processor", version.Processor, -1, paReplace);
+        vsapi->mapSetData(out, "mkl_processor", version.Processor, -1, maReplace);
 
         std::ostringstream mkl_version_str;
         mkl_version_str << version.MajorVersion << '.' << version.MinorVersion << '.' << version.UpdateVersion;
 
-        vsapi->propSetData(out, "mkl_version", mkl_version_str.str().c_str(), -1, paReplace);
+        vsapi->mapSetData(out, "mkl_version", mkl_version_str.str().c_str(), -1, maReplace);
     };
-    registerFunc("Version", "", getVersion, nullptr, plugin);
+    vspapi->registerFunction("Version", "", "version:int;mkl_version_build:data;mkl_processor:data;mkl_version:data;", getVersion, nullptr, plugin);
 }
